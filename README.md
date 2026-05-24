@@ -24,7 +24,7 @@ Running the demo on a short paragraph mixing conditions, causes, contrast, and h
 
 | 3D surface | Heatmap |
 | :--- | :--- |
-| ![3D logical surface](outputs/Figure_1.png) | ![Logical surface heatmap](outputs/Figure_2.png) |
+| ![3D logical surface](outputs/v1/runs/example/surface.png) | ![Logical surface heatmap](outputs/v1/runs/example/heatmap.png) |
 
 Yellow ridges along the *cause* row come from `therefore` / `because` / `consequently`. Dark troughs around *contrast* and *negation* come from `but` / `however` / `not`. The peak near token 0 on *condition* is the opening `If`.
 

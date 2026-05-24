@@ -1,0 +1,8 @@
+
+If a text contains many conditions, then it may branch into several possible meanings.
+However, if the same text also contains strong causal operators, because it explains
+why one claim follows from another, then the logical flow becomes more structured.
+But when the text repeatedly says maybe, possibly, or not, the surface develops
+uncertainty troughs and contradiction pressure.
+Therefore, this geometric representation can help us compare texts by their
+logical shape rather than only by their words.

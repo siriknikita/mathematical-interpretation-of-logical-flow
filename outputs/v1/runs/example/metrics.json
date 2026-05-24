@@ -1,0 +1,14 @@
+{
+  "token_count": 77.0,
+  "operator_count": 15.0,
+  "operator_density_per_100_tokens": 19.48051948051948,
+  "positive_wave_mass": 2407.8950702560114,
+  "negative_wave_mass": 2246.195479111779,
+  "net_logical_elevation": 0.005614569136952511,
+  "surface_energy": 0.06450176357869762,
+  "surface_roughness": 0.021980623417243522,
+  "branching_density": 1.2987012987012987,
+  "contrast_pressure": 2.5974025974025974,
+  "causal_inference_density": 9.09090909090909,
+  "uncertainty_density": 2.5974025974025974
+}

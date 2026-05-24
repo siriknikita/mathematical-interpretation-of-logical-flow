@@ -1,0 +1,51 @@
+{
+  "run_id": "example",
+  "version": "v1",
+  "timestamp_utc": "2026-05-24T10:18:52.369199+00:00",
+  "script": "logical_surface_model_v1.py",
+  "input": {
+    "char_count": 507,
+    "sha256": "4a7eba72fac2d7f20fda3b08cd6b333b00c4d79b4001e0f4784cd6c2bae9c30b",
+    "preview": "If a text contains many conditions, then it may branch into several possible meanings.\nHowever, if the same text also contains strong causal operators, because it explains\nwhy one claim follows from a"
+  },
+  "config": {
+    "x_resolution": 240,
+    "y_resolution": 120,
+    "cross_family_width": 0.55
+  },
+  "operator_catalog": {
+    "count": 50,
+    "families": [
+      "conjunction",
+      "disjunction",
+      "negation",
+      "contrast",
+      "condition",
+      "cause",
+      "evidence",
+      "uncertainty"
+    ],
+    "sha256": "f1baa3c41310cd87e66193d0a1c090ddfec622e2bc3fcd44795ad2edead6eddf"
+  },
+  "intensifiers": [
+    "always",
+    "clearly",
+    "definitely",
+    "extremely",
+    "must",
+    "really",
+    "strongly",
+    "very"
+  ],
+  "hedges": [
+    "could",
+    "kind",
+    "maybe",
+    "might",
+    "possibly",
+    "probably",
+    "seems",
+    "somewhat",
+    "sort"
+  ]
+}
