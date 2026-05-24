@@ -381,3 +381,189 @@ The candidate kernel is `gaussian_along_bridge_normal × scaled_arch_along_bridg
 - Is the right next step v3 (calibration of the heuristic) or a jump to v4 (replace the heuristic scope inference with a real dependency/constituency parser)? Both are reasonable. v3 is cheaper and tests whether the *shape* of the model is right; v4 tests whether the *operators* are right.
 
 ---
+
+## Stage 3 — Bounded scopes, confidence, energy normalization (`logical_surface_model_v3.py`)
+
+**Status:** current. Entry point: `uv run logical_surface_model_v3.py` (with `--text`, `--file`, `--no-plots`, `--no-save`, `--output-dir`, `--run-id`, `--x-resolution`, `--y-resolution`, `--operator-cross-family-width`, `--relation-cross-family-width`, `--max-relation-ratio`).
+
+### Goal
+
+Fix the calibration failure Stage 2 exposed — `relation_to_operator_energy_ratio ≈ 5.43`, `scope_coverage_ratio ≈ 0.987` — without abandoning the relational layer. Three things had to change:
+
+1. **bound** the scopes so they don't spill across the whole sentence,
+2. **score** each relation with a confidence and multiply amplitude by it,
+3. **cap** the relation field's energy relative to the operator field.
+
+A fourth, structural change: every run becomes a **self-contained reproducible artifact** under `outputs/v3/runs/{run_id}/` (`params.json` + `input_text.txt` + `metrics.json` + 5 PNGs).
+
+### Model
+
+#### Diff against v2 (only what changed)
+
+| # | Decision | v2 | v3 | Why |
+| - | -------- | -- | -- | --- |
+| 1 | Tokenization | sentence-aware (`.!?;` advance sentence; `,` ignored) | clause-aware: `,` and `:` advance a `clause_index`; `.!?;` advance both; `;` advances both | scope inference needs sub-sentence boundaries — a `because`-clause embedded in a `then`-arm should not spill across the whole `then` |
+| 2 | Token model | `Token(text, index, char_start, char_end, sentence_index)` | adds `clause_index`; a `ClauseBoundary(token_after, sentence_index, clause_index_before, reason)` log records every boundary that was crossed | relations now query both granularities |
+| 3 | Scope endpoints | `clause_end ≡ sentence_end` | `bounded_end(default_end, max_end, event, events, max_tokens, stop_at_major_operator)` — clips at clause end, at the next major-operator start (`condition` / `cause` / `contrast`), and at a per-rule absolute token cap | v2's "everything between operator and `.`" rule was the actual source of the flooding |
+| 4 | Relation object | no confidence field | adds `confidence`, `raw_amplitude`, `bridge_width`, `evidence`; `amplitude = raw_amplitude × confidence` | a fronted `because` with weak premises should not contribute as much as an explicit `if … then …` |
+| 5 | `or` classification | always `branching` | `is_list_or` checks ±3-token window for uncertainty/negation markers and demotes to `list_disjunction` (lower amplitude, narrower kernel, no fork oscillation) | `"maybe, possibly, or not"` is a list, not a semantic fork |
+| 6 | `because` inside `if … then …` | full causal bridge from after-`because` to sentence start | detected and demoted to `because_local_supports_if_scope` — source = after-`because` → before-`then`, target = after-`if` → before-`because` | the `because`-clause is parenthetical to the `if`-arm, not the whole sentence |
+| 7 | Bridge geometry | `interval_kernel × (0.75 + 0.25·cos)` — flat-top with mild arch | `bounded_bridge_kernel = x_gate × (0.35 + 0.65·sin) × gaussian_centerline × y_gate` — a ridge along the span midpoint that fades transversely | v2's plateau was the geometric source of the flooding; v3 is a *bridge*, not a *blanket* |
+| 8 | Relation energy | uncapped — `total_Z = operator_Z + relation_Z` | `normalize_relation_energy` rescales `relation_Z` so `mean(relation_Z²) ≤ mean(operator_Z²) × max_relation_to_operator_ratio` (default 1.25) | the single biggest v2 failure; without it, v2 reported 5.4× operator energy |
+| 9 | Surface bundle | `operator_Z`, `relation_Z`, `total_Z` | adds `relation_Z_raw` (pre-cap), `relation_energy_scale`, so the cap is auditable | every run reports both raw and capped relation energy and the scale factor that was applied |
+| 10 | Metrics | grid-independent densities, `relation_to_operator_energy_ratio`, `semantic_stability` | adds `relation_to_operator_energy_ratio_raw`, `relation_energy_scale`, `bridge_coverage_ratio`, `average_relation_confidence`, `minimum_relation_confidence`, `list_disjunction_density`; reweights `semantic_stability` to penalize *uncapped* overreach, not capped overreach | the new metrics make the v2 → v3 improvement directly measurable |
+| 11 | Reporting | events + relations + metrics + 4 PNGs | adds a **raw** relation heatmap alongside the **normalized** one (5 PNGs total) | the cap must not be silent — both fields are written |
+| 12 | Output layout | optional `--save-prefix` writes ad-hoc filenames | every invocation writes `outputs/v3/runs/{run_id}/` containing `params.json` (config + input SHA256 + operator-catalog SHA256 + intensifier/hedge lists), `input_text.txt`, `metrics.json`, and 5 PNGs; `run_id` is `YYYYMMDDTHHMMSSZ_<text-sha6>_<uuid4>` unless `--run-id` overrides | a metrics number with no record of the catalog, hedge set, and exact text is useless six months later |
+
+Everything not in this table is preserved from v2 — the operator catalog *structure*, polarity convention, longest-pattern-first matching with `occupied` mask, Mexican-hat wavelet for operator events, `local_context_factor`. The catalog *values* were retuned in passing (e.g., `not` raw strength 1.00 vs. v1's 0.80, `because` 1.10) but these are calibration knobs, not load-bearing changes.
+
+#### Bounded-scope rule (`bounded_end`, `logical_surface_model_v3.py:429`)
+
+The single most important new helper. Every scope endpoint in v3 routes through it:
+
+```python
+end = min(default_end, max_end)               # clause clamp
+if stop_at_major_operator:
+    end = min(end, next_major_operator_start) # operator clamp
+if max_tokens is not None:
+    end = min(end, event.token_end + max_tokens)  # absolute cap
+return max(event.token_end, end)              # never empty
+```
+
+`MAJOR_OPERATOR_FAMILIES = {condition, cause, contrast}` — these are the families v2 was spilling across. The per-rule `max_tokens` ceiling (5–16 depending on relation kind) is the hard absolute; the clause and operator clamps are the soft constraints that usually fire first.
+
+#### Thin bridge geometry (`bounded_bridge_kernel`, `logical_surface_model_v3.py:1063`)
+
+```
+x_gate     = interval_kernel(X, start, end, edge_width)
+arch       = 0.35 + 0.65 · sin(π · (X − start) / (end − start))
+centerline = gaussian((X − midpoint) / length, σ = 0.42)
+y_gate     = gaussian(Y − family_y, bridge_width)          # bridge_width ≈ 0.30–0.36
+field      = x_gate · arch · centerline · y_gate
+```
+
+The difference vs. v2: a narrow `centerline` Gaussian tapers the bridge transversely to its own X-span, and the per-relation `bridge_width` along Y is ~0.30–0.36 (vs. v2's `relation_cross_family_width = 0.75`). Together these turn the v2 plateau into a *thin ridge* that connects two regions without painting the area between them. Scope-style relations (`negation_scope`, `uncertainty_scope`, `conditional_scope`, `list_disjunction`) bypass the bridge and use the simpler `scope_kernel = interval_kernel × y_gate` — they have one span, not two, so no bridge is needed.
+
+#### Energy cap (`normalize_relation_energy`, `logical_surface_model_v3.py:1105`)
+
+```python
+op_e  = mean(operator_Z ** 2)
+rel_e = mean(relation_Z_raw ** 2)
+if rel_e > op_e * max_ratio:
+    scale = sqrt(op_e * max_ratio / rel_e)
+    relation_Z = relation_Z_raw * scale
+```
+
+Soft normalization, not truncation: the relation field is preserved *in shape*, only attenuated *in amplitude*. The scale factor is stored on `SurfaceBundle.relation_energy_scale` and emitted as `relation_energy_scale` in metrics, so any value <1.0 in a future run is the diagnostic that the cap fired. For the canonical sample the scale is `1.0` — the cap is not needed because v3's bounded scopes + thin bridges + confidence weighting *upstream* already keep `relation_to_operator_energy_ratio_raw` below 1.25 (it lands at 0.328).
+
+#### Confidence (per-relation)
+
+| Relation construction | Confidence | Reason |
+| --------------------- | ----------:| ------ |
+| `if … then …` (explicit, same sentence) | 0.96 | both endpoints present |
+| `because` inside an `if … then …` | 0.82 | parenthetical role inferred from local structure |
+| `because` after a same-clause claim | 0.76 | clause-local construction |
+| `because` fronted (sentence-initial) | 0.58 | premise is in the *next* clause, weakly attached |
+| `if` without matching `then` | 0.50 | open conditional, no target |
+| `contrast` (same-clause source) | 0.86 | source span is immediately to the left |
+| `contrast` (previous clause / sentence) | 0.78 / 0.72 | source resolved by lookback |
+| `contrast` fallback | 0.45 | sentence-start with no clear premise |
+| `conclusion` (same-clause source) | 0.78 | premises immediately to the left |
+| `conclusion` (previous clause / sentence) | 0.72 / 0.70 | weaker premise binding |
+| `conclusion` fallback | 0.45 | weak premise context |
+| `branching` vs `list_disjunction` | 0.68 / 0.82 | a list pattern is *more* certain than a fork |
+| `negation_scope` | 0.88 | local rule, high precision |
+| `uncertainty_scope` | 0.78 | local rule, slightly noisier |
+
+`average_relation_confidence` and `minimum_relation_confidence` are emitted as metrics so a sparse all-fallback run is distinguishable from one with several explicit `if … then …` structures.
+
+### Results — same canonical sample text
+
+The 77-token paragraph from Stage 1/2, re-analyzed. Saved as `outputs/v3/runs/example/` (params, input, metrics, 5 PNGs).
+
+15 operator events (identical to Stage 1 — the operator-detection pipeline is unchanged). 10 inferred relations:
+
+```
+implication        sent 0  clause 0   amp +0.816  conf 0.96  if_scope -> then_scope                  explicit_if_then
+contrast           sent 1  clause 2   amp −0.518  conf 0.72  left_claim <-> however_right_claim      contrast_previous_sentence
+implication        sent 1  clause 3   amp +0.816  conf 0.96  if_scope -> then_scope                  explicit_if_then
+causal_support     sent 1  clause 4   amp +0.508  conf 0.82  because_local_supports_if_scope         because_inside_if_then
+contrast           sent 2  clause 6   amp −0.518  conf 0.72  left_claim <-> but_right_claim          contrast_previous_sentence
+uncertainty_scope  sent 2  clause 6   amp −0.187  conf 0.78  maybe_bounded_scope                     local_uncertainty_scope
+uncertainty_scope  sent 2  clause 7   amp −0.187  conf 0.78  possibly_bounded_scope                  local_uncertainty_scope
+list_disjunction   sent 2  clause 8   amp +0.118  conf 0.82  list_left or list_right                 uncertainty_or_negation_list
+negation_scope     sent 2  clause 8   amp −0.380  conf 0.88  not_bounded_scope                       local_negation_scope
+conclusion         sent 3  clause 10  amp +0.648  conf 0.72  premises -> therefore_conclusion        conclusion_previous_clause
+```
+
+Headline metrics (new in v3 or directly comparable to v2):
+
+```
+relation_to_operator_energy_ratio_raw   0.328047   (v2: 5.432865)
+relation_to_operator_energy_ratio       0.328047   (cap not needed; scale = 1.000)
+scope_coverage_ratio                    0.740260   (v2: 0.987013)
+bridge_coverage_ratio                   0.636364   (new in v3)
+average_relation_confidence             0.816000   (new in v3)
+minimum_relation_confidence             0.720000   (new in v3)
+semantic_stability                      0.772542   (v2: "low")
+logical_balance_ratio                   1.128667
+logical_tension_density                 0.017958
+surface_energy_density                  0.115343
+```
+
+`interpret_metrics` summary:
+
+> constructive and destabilizing forces are relatively balanced; low local logical tension; the surface is mostly driven by local operators; no severe relation overreach was detected; moderate text coverage; high average relation confidence; moderate semantic stability.
+
+### Interpretation
+
+The three Stage-2 → Stage-3 entry conditions, with actual outcomes:
+
+```
+relation_to_operator_energy_ratio   target [0.8, 1.5]   actual 0.328   ← under target; cap unused
+scope_coverage_ratio                target < ~0.70       actual 0.740   ← above target by 0.04
+semantic_stability                  target rises         actual 0.772   ← was "low" in v2
+```
+
+The relation field is no longer flooding. The operator-only heatmap (`operator_heatmap.png`) carries most of the surface energy; the normalized relation heatmap (`relation_normalized_heatmap.png`) adds bounded ridges along the `implication`, `causal_support`, `contrast`, and `conclusion` spans without painting the whole sentence. The raw relation heatmap (`relation_raw_heatmap.png`) is identical to the normalized one for this text — diagnostic confirmation that the cap was *not* the mechanism doing the work; the bounded scopes + thin bridges + confidence weighting upstream were.
+
+The two relations that did the heavy lifting in v2 — the two `implication`s — are now confidence 0.96, amplitude +0.816, and *spatially compact*. The `because` that v2 stacked redundantly on top of the inner `if … then …` is now correctly nested as `because_inside_if_then` with reduced amplitude (+0.508 vs. v2's ~+0.88) and a span clipped to the `if`-arm. The `or` that v2 fork-shaped is now `list_disjunction` with the lowest amplitude in the run (+0.118). These are the four concrete v2 failure modes spelled out at the end of Stage 2, all addressed.
+
+What v3 also reveals — invisible until the surface stopped flooding — is a different class of problems: **the inferred relations are now spatially reasonable, but several are still semantically wrong.**
+
+### Limitations of v3 (and what they motivate)
+
+1. **`therefore` collapses target onto source.** In the canonical run the `conclusion` relation has source span and target span both equal to *"the surface develops uncertainty troughs and contradiction pressure"* — but the correct target is the post-`therefore` clause *"this geometric representation can help us compare texts by their logical shape rather than only by their words"*. Root cause (`logical_surface_model_v3.py:843`): when `therefore` is sentence-initial, `target_end = bounded_end(default_end=clause_end, …)`, and the clause containing `therefore` is just the token `therefore` itself (the immediately following comma starts a new clause). So `target_end == event.token_end`, the target span is empty, and `make_relation` falls back to copying source. → **v4 should resolve the conclusion target via `next_clause_bounds` (with `sent_end` as the fallback), not via `clause_end`.**
+
+2. **`not` in a list is still emitted as an active `negation_scope`.** The v3 `is_list_or` check correctly demotes the `or` in *"maybe, possibly, or not"* to `list_disjunction`, but the `not` token continues down its own path and emits a separate `negation_scope` (amplitude −0.380). The model double-counts: once as part of the list, once as an active negation. → **v4 should propagate the list-context decision: a `not` / `maybe` / `possibly` that sits inside a `list_disjunction` source-or-target span should not also emit its own scope.**
+
+3. **Mentioned-vs-used is not distinguished.** The model treats *"the text says maybe"* identically to *"maybe X"*. In the canonical sample, *"when the text repeatedly says maybe, possibly, or not"* is *talking about* the operator words, not using them — yet v3 emits two `uncertainty_scope`s and a `negation_scope` for tokens that are arguably nouns in this sentence. → **v4 should add a metalinguistic-mention detector: an operator token immediately preceded by a reporting verb (`says`, `mentions`, `writes`, `contains`, `uses`) or appearing inside quotes should be reclassified as `mentioned_operator` and not produce a scope or wave.**
+
+4. **`if … then …` source span has no internal clause clamp.** The second implication's source is *"the same text also contains strong causal operators because it explains why one claim follows from another"*. The `because`-clause is correctly handled by rule 6 (it gets its own bounded relation), but the *outer* `if`-source still extends through the comma into the `because`-clause's territory because the source span is "after `if` → before `then`" with no `bounded_end` between them. → **v4 should clamp the `if`-source at the first major-operator boundary inside the `if`-arm (analogous to how target spans already use `bounded_end`).**
+
+5. **The surface is a scalar field; relation topology is invisible on it.** A bridge between span A and span B looks identical to a wave centered between them. The heatmaps show *where* relation pressure sits, not *which span supports which*. → **v4 should add a relation-graph overlay: arrows or curves between source-center and target-center, drawn on top of the heatmap, colored by relation kind, line-weighted by `confidence × |amplitude|`.** Presentation change, not a model change, but it would convert the metrics-and-PNGs output into something a reader can actually *read*.
+
+6. **`semantic_stability` may be too high on a contradictory paragraph.** The canonical text has explicit `however`, `but`, `not`, and a stacked contrast across sentences, yet scores 0.772 — solidly "moderate", almost "high". That reflects the v3 reweighting (less penalty for capped overreach), but it may have over-corrected. → **v4 should sanity-check the metric on a deliberately contradictory text (a known argument-vs-counterargument pair) and recalibrate if the metric saturates.**
+
+### Concrete v4 entry conditions
+
+To move from v3 to v4 cleanly, the following should hold after v4:
+
+```
+canonical conclusion target          = post-therefore clause, not a self-copy
+canonical not-in-list                = no separate negation_scope emitted
+mentioned-operator detection rate    ≥ 90% on a hand-labeled "says X" / "writes Y" set
+relation-graph overlay               renders on every heatmap (or replaces one of the 5 PNGs)
+semantic_stability                   differentiates contradictory from coherent texts
+```
+
+The first two are mechanical fixes — both are isolated boundary-arithmetic bugs in `infer_logical_relations`. The third is a small new rule (lookback for reporting verbs, plus a quote-marker pass over the tokenizer). The fourth is a new plotting layer. The fifth is calibration work, not a structural change.
+
+### Open questions to revisit at v4
+
+- Should `mentioned_operator` tokens be filtered out entirely (no wave, no scope), or kept on the surface with flat-zero amplitude so they still occupy token positions and don't shift the X-axis layout of other events? The latter is more consistent with the "the surface is a function of the whole text" framing.
+- Should the relation-graph overlay replace one of the current 5 PNGs (e.g., merge the raw + normalized relation heatmaps into a single panel with an arrow overlay) or add a 6th? More artifacts per run is more inspectable but less navigable.
+- Is `bounded_end`'s "stop at next major operator" the right granularity, or should it be "stop at next operator *of the same family*"? The current rule prevents a `because` from spilling into a `however` (right) but also prevents a `because` from spilling into a `but` (arguably wrong if the `but` is inside the `because`-clause's natural scope).
+- Should `argumentative_depth` (max overlap of relation spans) be split into `homogeneous_depth` (overlapping relations of compatible kinds — e.g., `causal_support` nested inside `implication`) vs. `heterogeneous_overlap` (e.g., a `contrast` overlapping a `branching`)? Stage 2 already flagged this as open; v3 added no new evidence either way.
+
+---
