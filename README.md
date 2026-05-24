@@ -39,31 +39,81 @@ Requires Python ≥ 3.13 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
-uv run main.py
+uv run logical_surface_model_v1.py        # Stage 1: operator-wave toy model
+uv run logical_surface_model_v2.py        # Stage 2: + scope/relation fields
+uv run logical_surface_model_v3.py        # Stage 3: + bounded scopes, confidence, energy normalization
 ```
 
-The script runs the embedded `sample_text` and opens two matplotlib windows (3D surface, then heatmap). Close them to let the process exit.
+By default each script runs the embedded sample text, prints its analysis, opens the matplotlib windows, **and writes a full run directory under `outputs/v{N}/runs/{run_id}/`** (see below). Close the matplotlib windows to let the process exit.
 
-To analyze your own text from a REPL or another script:
+### CLI flags
+
+All three versions share the same core flags:
+
+| Flag | Default | Effect |
+| :--- | :--- | :--- |
+| `--text "…"` | — | Analyze the given string instead of the embedded sample. |
+| `--file path.txt` | — | Analyze the UTF-8 contents of a file. |
+| `--no-plots` | off | Skip opening matplotlib windows (still writes PNGs unless `--no-save`). |
+| `--no-save` | off | Skip writing the run directory entirely. |
+| `--output-dir PATH` | `./outputs` | Override the output root (run dir becomes `PATH/v{N}/runs/{run_id}/`). |
+| `--run-id ID` | auto | Override the auto-generated run id (`YYYYMMDDTHHMMSSZ_<text-sha6>_<uuid4>`). |
+| `--x-resolution N` | 240 (v1) / 280 (v2, v3) | Surface samples along the token axis. |
+| `--y-resolution N` | 120 (v1) / 140 (v2, v3) | Surface samples along the logical-family axis. |
+
+Version-specific knobs:
+
+- **v1** — `--cross-family-width` (default `0.55`).
+- **v2** — `--operator-cross-family-width` (default `0.55`), `--relation-cross-family-width` (default `0.75`).
+- **v3** — `--operator-cross-family-width` (default `0.55`), `--relation-cross-family-width` (default `0.42`), `--max-relation-ratio` (default `1.25`, caps relation/operator field energy).
+
+### Run directory layout
+
+Every invocation produces a self-contained, reproducible run folder:
+
+```
+outputs/v{N}/runs/{run_id}/
+├── params.json        # version, UTC timestamp, input SHA256 + preview, config values,
+│                      # operator catalog signature, intensifier/hedge wordlists
+├── input_text.txt     # the exact text analyzed
+├── metrics.json       # every computed metric
+└── *.png              # surface + heatmap renders (per-version filenames below)
+```
+
+PNG filenames per version:
+
+- **v1** — `surface.png`, `heatmap.png`
+- **v2** — `total_surface.png`, `total_heatmap.png`, `operator_heatmap.png`, `relation_heatmap.png`
+- **v3** — same as v2 plus `relation_raw_heatmap.png` and `relation_normalized_heatmap.png`
+
+### Using the module from Python
 
 ```python
-from main import analyze_text
+from logical_surface_model_v3 import analyze_text
 
-result = analyze_text("If it rains, then the picnic is cancelled. However, ...", show_plots=False)
+result = analyze_text(
+    "If it rains, then the picnic is cancelled. However, ...",
+    show_plots=False,                  # don't open matplotlib windows
+    save=True,                         # still write outputs/v3/runs/{run_id}/
+)
 print(result["metrics"])
+print(result["run_dir"])               # pathlib.Path of the run folder
 ```
 
 ## What's in here
 
 ```
-main.py            # the entire model: catalog, tokenizer, matcher, surface builder, plots
-pyproject.toml     # dependencies (numpy, matplotlib) and Python pin
-uv.lock            # resolved environment
-outputs/           # saved example renders
-CLAUDE.md          # implementation notes for working on the code with Claude Code
+logical_surface_model_v1.py    # Stage 1: operator waves on a token-position × family grid
+logical_surface_model_v2.py    # Stage 2: + scope/relation fields and clause inference
+logical_surface_model_v3.py    # Stage 3: + bounded scopes, confidence, energy normalization
+pyproject.toml                 # dependencies (numpy, matplotlib) and Python pin
+uv.lock                        # resolved environment
+outputs/                       # auto-saved per-run folders (v{N}/runs/{run_id}/) plus example renders
+JOURNAL.md                     # stage-by-stage research log
+CLAUDE.md                      # implementation notes for working on the code with Claude Code
 ```
 
-The operator catalog (`LOGICAL_OPERATORS` in `main.py`) is the main knob — each entry's `polarity`, `strength`, and `width` shape the surface. Adding or retuning an operator is a one-line change.
+The operator catalog (`LOGICAL_OPERATORS` in each script) is the main knob — each entry's `polarity`, `strength`, and `width` shape the surface. Adding or retuning an operator is a one-line change.
 
 ## What this is and isn't
 

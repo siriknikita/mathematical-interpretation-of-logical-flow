@@ -1,13 +1,23 @@
 
 from __future__ import annotations
 
+import argparse
+import hashlib
+import json
 import re
+import uuid
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import cm
+
+
+VERSION_TAG = "v1"
+DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent / "outputs"
 
 
 @dataclass(frozen=True)
@@ -308,7 +318,14 @@ def print_metrics(metrics: Dict[str, float]) -> None:
             print(f"{key:<36} {value:.6f}")
 
 
-def plot_surface(X: np.ndarray, Y: np.ndarray, Z: np.ndarray, title: str = "Logical Surface of Text") -> None:
+def plot_surface(
+    X: np.ndarray,
+    Y: np.ndarray,
+    Z: np.ndarray,
+    title: str = "Logical Surface of Text",
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> None:
     fig = plt.figure(figsize=(13, 8))
     ax = fig.add_subplot(111, projection="3d")
 
@@ -331,39 +348,161 @@ def plot_surface(X: np.ndarray, Y: np.ndarray, Z: np.ndarray, title: str = "Logi
     ax.set_yticklabels(FAMILY_ORDER)
 
     fig.colorbar(surface, shrink=0.55, aspect=12, pad=0.08, label="Elevation")
-    plt.tight_layout()
-    plt.show()
+    fig.subplots_adjust(left=0.04, right=0.86, bottom=0.08, top=0.92)
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=180)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
-def plot_heatmap(X: np.ndarray, Y: np.ndarray, Z: np.ndarray, title: str = "Logical Surface Heatmap") -> None:
-    plt.figure(figsize=(13, 5))
-    plt.imshow(
+def plot_heatmap(
+    X: np.ndarray,
+    Y: np.ndarray,
+    Z: np.ndarray,
+    title: str = "Logical Surface Heatmap",
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> None:
+    fig, ax = plt.subplots(figsize=(13, 5))
+    plotted = ax.imshow(
         Z,
         aspect="auto",
         origin="lower",
         extent=[X.min(), X.max(), Y.min(), Y.max()],
     )
-    plt.title(title)
-    plt.xlabel("Token position")
-    plt.ylabel("Logical family")
-    plt.yticks(list(FAMILY_TO_Y.values()), FAMILY_ORDER)
-    plt.colorbar(label="Logical elevation")
-    plt.tight_layout()
-    plt.show()
+    ax.set_title(title)
+    ax.set_xlabel("Token position")
+    ax.set_ylabel("Logical family")
+    ax.set_yticks(list(FAMILY_TO_Y.values()))
+    ax.set_yticklabels(FAMILY_ORDER)
+    fig.colorbar(plotted, ax=ax, label="Logical elevation")
+    fig.subplots_adjust(left=0.12, right=0.88, bottom=0.15, top=0.90)
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=180)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
-def analyze_text(text: str, show_plots: bool = True) -> Dict[str, object]:
+# =============================================================================
+# Run artifact persistence
+# =============================================================================
+
+
+def operator_catalog_signature() -> Dict[str, object]:
+    payload = "|".join(
+        f"{op.phrase}:{op.family}:{op.polarity}:{op.strength}:{op.width}"
+        for op in LOGICAL_OPERATORS
+    )
+    return {
+        "count": len(LOGICAL_OPERATORS),
+        "families": list(FAMILY_ORDER),
+        "sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+    }
+
+
+def generate_run_id(text: str) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:6]
+    suffix = uuid.uuid4().hex[:4]
+    return f"{stamp}_{digest}_{suffix}"
+
+
+def prepare_run_directory(output_root: Path, run_id: str) -> Path:
+    run_dir = output_root / VERSION_TAG / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def write_run_params(
+    run_dir: Path,
+    *,
+    run_id: str,
+    text: str,
+    config: Dict[str, object],
+) -> Path:
+    params = {
+        "run_id": run_id,
+        "version": VERSION_TAG,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "script": Path(__file__).name,
+        "input": {
+            "char_count": len(text),
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "preview": text.strip()[:200],
+        },
+        "config": config,
+        "operator_catalog": operator_catalog_signature(),
+        "intensifiers": sorted(INTENSIFIERS),
+        "hedges": sorted(HEDGES),
+    }
+    params_path = run_dir / "params.json"
+    params_path.write_text(json.dumps(params, indent=2), encoding="utf-8")
+    (run_dir / "input_text.txt").write_text(text, encoding="utf-8")
+    return params_path
+
+
+def write_run_metrics(run_dir: Path, metrics: Dict[str, float]) -> Path:
+    metrics_path = run_dir / "metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    return metrics_path
+
+
+def analyze_text(
+    text: str,
+    *,
+    show_plots: bool = True,
+    save: bool = True,
+    output_root: Optional[Path] = None,
+    run_id: Optional[str] = None,
+    x_resolution: int = 240,
+    y_resolution: int = 120,
+    cross_family_width: float = 0.55,
+) -> Dict[str, object]:
     tokens, events = find_operator_events(text)
-    X, Y, Z = build_surface(tokens, events)
+    X, Y, Z = build_surface(
+        tokens,
+        events,
+        x_resolution=x_resolution,
+        y_resolution=y_resolution,
+        cross_family_width=cross_family_width,
+    )
     metrics = compute_metrics(tokens, events, Z)
 
     print(f"Tokenized text into {len(tokens)} tokens.")
     print_events(events)
     print_metrics(metrics)
 
-    if show_plots:
-        plot_surface(X, Y, Z)
-        plot_heatmap(X, Y, Z)
+    run_dir: Optional[Path] = None
+    if save:
+        root = Path(output_root) if output_root is not None else DEFAULT_OUTPUT_ROOT
+        resolved_run_id = run_id or generate_run_id(text)
+        run_dir = prepare_run_directory(root, resolved_run_id)
+        config = {
+            "x_resolution": x_resolution,
+            "y_resolution": y_resolution,
+            "cross_family_width": cross_family_width,
+        }
+        write_run_params(run_dir, run_id=resolved_run_id, text=text, config=config)
+        write_run_metrics(run_dir, metrics)
+        print(f"\nRun directory: {run_dir}")
+
+    surface_path = (run_dir / "surface.png") if run_dir is not None else None
+    heatmap_path = (run_dir / "heatmap.png") if run_dir is not None else None
+
+    if show_plots or run_dir is not None:
+        plot_surface(X, Y, Z, save_path=surface_path, show=show_plots)
+        plot_heatmap(X, Y, Z, save_path=heatmap_path, show=show_plots)
+
+        if run_dir is not None:
+            print("Saved plots:")
+            print(f"- {surface_path}")
+            print(f"- {heatmap_path}")
 
     return {
         "tokens": tokens,
@@ -372,18 +511,65 @@ def analyze_text(text: str, show_plots: bool = True) -> Dict[str, object]:
         "Y": Y,
         "Z": Z,
         "metrics": metrics,
+        "run_id": run_id if run_id is not None else (run_dir.name if run_dir is not None else None),
+        "run_dir": run_dir,
     }
 
 
-if __name__ == "__main__":
-    sample_text = """
-    If a text contains many conditions, then it may branch into several possible meanings.
-    However, if the same text also contains strong causal operators, because it explains
-    why one claim follows from another, then the logical flow becomes more structured.
-    But when the text repeatedly says maybe, possibly, or not, the surface develops
-    uncertainty troughs and contradiction pressure.
-    Therefore, this geometric representation can help us compare texts by their
-    logical shape rather than only by their words.
-    """
+SAMPLE_TEXT = """
+If a text contains many conditions, then it may branch into several possible meanings.
+However, if the same text also contains strong causal operators, because it explains
+why one claim follows from another, then the logical flow becomes more structured.
+But when the text repeatedly says maybe, possibly, or not, the surface develops
+uncertainty troughs and contradiction pressure.
+Therefore, this geometric representation can help us compare texts by their
+logical shape rather than only by their words.
+"""
 
-    analyze_text(sample_text, show_plots=True)
+
+def load_text_from_args(args: argparse.Namespace) -> str:
+    if args.text is not None:
+        return args.text
+    if args.file is not None:
+        return Path(args.file).read_text(encoding="utf-8")
+    return SAMPLE_TEXT
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Logical Surface Model v1")
+    parser.add_argument("--text", type=str, default=None, help="Text to analyze directly.")
+    parser.add_argument("--file", type=str, default=None, help="Path to a UTF-8 text file to analyze.")
+    parser.add_argument("--no-plots", action="store_true", help="Skip displaying matplotlib windows.")
+    parser.add_argument("--no-save", action="store_true", help="Skip writing the run directory.")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help=f"Override the output root (default: {DEFAULT_OUTPUT_ROOT}).",
+    )
+    parser.add_argument("--run-id", type=str, default=None, help="Override the auto-generated run id.")
+    parser.add_argument("--x-resolution", type=int, default=240, help="Surface resolution along token axis.")
+    parser.add_argument("--y-resolution", type=int, default=120, help="Surface resolution along logical-family axis.")
+    parser.add_argument(
+        "--cross-family-width",
+        type=float,
+        default=0.55,
+        help="Gaussian width that bleeds an event into adjacent logical families.",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    cli_args = parse_args()
+    input_text = load_text_from_args(cli_args)
+
+    analyze_text(
+        input_text,
+        show_plots=not cli_args.no_plots,
+        save=not cli_args.no_save,
+        output_root=Path(cli_args.output_dir) if cli_args.output_dir else None,
+        run_id=cli_args.run_id,
+        x_resolution=cli_args.x_resolution,
+        y_resolution=cli_args.y_resolution,
+        cross_family_width=cli_args.cross_family_width,
+    )
