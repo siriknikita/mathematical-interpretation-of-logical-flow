@@ -567,3 +567,219 @@ The first two are mechanical fixes — both are isolated boundary-arithmetic bug
 - Should `argumentative_depth` (max overlap of relation spans) be split into `homogeneous_depth` (overlapping relations of compatible kinds — e.g., `causal_support` nested inside `implication`) vs. `heterogeneous_overlap` (e.g., a `contrast` overlapping a `branching`)? Stage 2 already flagged this as open; v3 added no new evidence either way.
 
 ---
+
+## Stage 4 — Mention detection, conclusion fix, relation-graph overlay (`logical_surface_model_v4.py`)
+
+**Status:** current. Entry point: `uv run logical_surface_model_v4.py` (CLI shape identical to v3 — `--text`, `--file`, `--no-plots`, `--no-save`, `--output-dir`, `--run-id`, `--x-resolution`, `--y-resolution`, `--operator-cross-family-width`, `--relation-cross-family-width`, `--max-relation-ratio`).
+
+### Goal
+
+Address four of the six v3 limitations: (1) the `therefore` target collapse, (2) the unpropagated list-context for `not` in *"or not"*, (3) the missing mentioned-vs-used distinction, and (5) the missing relation-graph overlay. Limitations (4) the un-clamped `if`-source span and (6) the possibly-over-corrected `semantic_stability` are deliberately deferred to v5.
+
+The conceptual addition is small but load-bearing: **a logical word being *used* and a logical word being *mentioned* are not the same event.** `Maybe the model is wrong` and `The text says maybe` produce identical token sequences for `maybe` but the second is talking about the word, not deploying it. v3 collapsed both into the same `uncertainty_scope`. v4 separates them.
+
+### Model
+
+#### Diff against v3 (only what changed)
+
+| # | Decision | v3 | v4 | Why |
+| - | -------- | -- | -- | --- |
+| 1 | `OperatorEvent` schema | (phrase, family, span, polarity, strength, width, context_factor, amplitude, sentence_idx, clause_idx) | adds `usage` ∈ {`active`, `mentioned`, `list_connector`}, `usage_confidence`, `usage_evidence`, and `raw_amplitude` (pre-damping). `amplitude = raw_amplitude × amplitude_multiplier` where the multiplier comes from the usage classifier | every detected operator now carries *what* it is being used as, not just *what word* it is |
+| 2 | Use classification | (none — every detection treated as active) | new `classify_operator_usage` (`logical_surface_model_v4.py:565`) with four passes: quote-marker check → mention-verb + (textual-subject OR uncertainty/negation phrase) → noun-of-words antecedent (`word`/`phrase`/`term`/`operator`/`marker`/`token` + no intervening punctuation) → local marker-list (≥2 hedge/negation tokens nearby with a mention verb in window) | each pass corresponds to a distinct mention pattern; falls through to `active` at confidence 0.82 |
+| 3 | Amplitude damping | (none) | `MENTION_USAGE_DAMPING = 0.12` for `mentioned`, `LIST_CONNECTOR_DAMPING = 0.22` for `list_connector` | mentioned words still occupy token positions (preserving the X-axis layout of other events) but contribute ~12%/22% of the wave a true active use would |
+| 4 | Mention vocabularies | (none) | three new sets: `MENTION_VERBS` (`says` / `mentions` / `writes` / `quotes` / `lists` / `names` / `calls` / `spells` …), `MENTION_NOUNS` (`word` / `phrase` / `term` / `operator` / `marker` / `token`), `TEXTUAL_SUBJECTS` (`text` / `sentence` / `paragraph` / `claim` / `argument` / `document` / `line` / `clause` / `surface` / `model` / `example`) | the rules are local and lexical — no parser, no embeddings; the three sets are the entire "knowledge" of metalinguistic mention |
+| 5 | `metalinguistic_operator_mention` | (no such relation kind — mentioned operators produced active `negation_scope` / `uncertainty_scope`) | a `mentioned` event short-circuits the normal per-family branch in `infer_logical_relations` and emits a `metalinguistic_operator_mention` relation with `raw_amplitude = event.raw_amplitude × 0.12`, width 2.0, bridge_width 0.24, on the operator's original family row | the surface still records that something happened at this token position, but at ~12% the energy of an active use and with a distinct kind that downstream metrics can filter |
+| 6 | Conclusion target | `target_end = bounded_end(default_end=clause_end, …)` — empty when `therefore` is sentence-initial (its clause is just `therefore`) | new helper `span_after_fronted_operator` (`logical_surface_model_v4.py:448`) — if the operator's clause is too short to hold a target, fall through to `next_clause_bounds_same_sentence`, else `sent_end`. Plus a new conclusion branch `fronted_sentence_marker` (`logical_surface_model_v4.py:1027`) that uses the *previous sentence* as source when the marker opens a new sentence | both halves of the v3 bug fixed: the source no longer falls through to the wrong clause, and the target no longer collapses onto the source |
+| 7 | `is_list_or` | checked ±3-token window for uncertainty/negation phrases | also accepts neighbors whose `usage` is already `mentioned` or `list_connector`, and accepts `event.usage == "list_connector"` directly | the list-context decision now propagates from the classifier instead of being re-derived per call site |
+| 8 | `list_disjunction` span | source/target = ±3 tokens from `or` (could land on filler words) | source/target = the `mentioned` events on either side of `or`, within 5 tokens — so for *"says maybe, possibly, or not"* the span becomes literally `(maybe, possibly) ↔ (not)` | the list-relation now points to the *actual list items*, not a heuristic window |
+| 9 | Plotting | 5 PNGs per run (3D surface + total / operator / relation_raw / relation_normalized heatmaps) | adds `plot_relation_graph` (`logical_surface_model_v4.py:1872`) → `relation_graph.png` (6th PNG): scatter of operator centers (dimmed for `mentioned`), curved arrows between source-center and target-center for bridge-style relations (line width = `1.1 + 2.0 × min(1, |amplitude|)`, alpha = `0.55 + 0.35 × confidence`, curve direction = sign of amplitude), short horizontal bars for scope-style relations | the scalar surface shows where logical pressure sits; the graph shows which span supports which |
+| 10 | `params.json` | records `intensifiers`, `hedges`, plus operator-catalog SHA256 | also records `mention_verbs`, `mention_nouns`, `textual_subjects` | the mention-classifier vocabularies are part of the model spec; a run without them recorded is non-reproducible |
+| 11 | Metrics added | — | `active_operator_count`, `mentioned_operator_count`, `list_connector_operator_count`, `active_operator_density_per_100_tokens`, `mentioned_operator_density_per_100_tokens`, `metalinguistic_mention_density` | the new classifier produces categorical buckets that need to be visible in metrics |
+| 12 | `interpret_metrics` | one line per axis (balance / tension / relation / normalization / coverage / confidence / stability) | adds a clause: *"some logical words are mentioned rather than actively used"* when `mentioned_operator_count > 0` | the metalinguistic regime needs to surface in the human-readable line |
+
+Everything not in this table is preserved from v3 — operator catalog structure, longest-pattern-first matching, `bounded_end`, `bounded_bridge_kernel`, `normalize_relation_energy`, the surface bundle (`operator_Z` + `relation_Z_raw` + `relation_Z` + `total_Z`), the run-folder output layout, and the entire `if … then …`, `because`, `contrast`, `branching`, `negation_scope`, `uncertainty_scope` rule set for *active* events.
+
+#### `classify_operator_usage` — the four passes (`logical_surface_model_v4.py:565`)
+
+```
+1. quoted_operator_word               token sits next to ", ', `, “, ” …
+                                      → mentioned (conf 0.92, damp 0.12)
+2. text_says_or_mentions_operator_word a MENTION_VERB in the left-6 window
+                                      AND (a TEXTUAL_SUBJECT in left-6+local OR
+                                           the operator is in UNCERTAINTY/NEGATION)
+                                      → mentioned (conf 0.88, damp 0.12)
+                                      → list_connector if BRANCHING phrase (conf 0.84, damp 0.22)
+3. operator_word_named_as_term         immediately preceded by a MENTION_NOUN
+                                      with no intervening punctuation
+                                      → mentioned (conf 0.78, damp 0.12)
+                                      → list_connector if BRANCHING (conf 0.72, damp 0.22)
+4. logical_marker_list_mention         ≥2 UNCERTAINTY/NEGATION phrases in the local
+                                      window AND a MENTION_VERB present
+                                      → mentioned (conf 0.86, damp 0.12)
+                                      → list_connector if BRANCHING (conf 0.86, damp 0.22)
+0. active_logical_use                  default — no mention signal found
+                                      → active (conf 0.82, damp 1.0)
+```
+
+Pass 2 is the load-bearing rule for the canonical text. *"when the text repeatedly says maybe, possibly, or not"* matches `says` (MENTION_VERB) in left-6, `text` (TEXTUAL_SUBJECT) in left-6, and `maybe` ∈ UNCERTAINTY_PHRASES — so `maybe` becomes `mentioned`, `possibly` becomes `mentioned`, `not` becomes `mentioned`, `or` becomes `list_connector`.
+
+#### Conclusion fix — `span_after_fronted_operator` (`logical_surface_model_v4.py:448`)
+
+```python
+start = event.token_end                # after the operator
+end   = clause_end                     # default: rest of the clause
+if end <= start:                       # the operator is alone in its clause
+    next_clause = next_clause_bounds_same_sentence(...)
+    if next_clause is not None:
+        start, end = next_clause       # use the next clause in this sentence
+    else:
+        start, end = event.token_end, sent_end  # fall back to sentence end
+if max_tokens is not None:
+    end = min(end, start + max_tokens)
+```
+
+Plus a new branch in the conclusion rule: when `event.token_start <= sent_start + 1` (the operator is the first token of its sentence), the source is the *previous sentence*, not the empty pre-operator span. Together these turn the v3 self-copy into a correctly-directed bridge.
+
+#### `plot_relation_graph` (`logical_surface_model_v4.py:1872`)
+
+Encoding:
+
+| Visual | Meaning |
+| ------ | ------- |
+| scatter point at (token_center, family_y) | operator event; size 34 for `active`, 22 for `mentioned`, alpha 0.85 / 0.45 |
+| rotated label above scatter | operator phrase |
+| curved arrow (`arc3,rad=±0.20`) source-center → target-center | bridge-style relation (`implication`, `causal_support`, `conclusion`, `contrast`, `branching`); curve up for positive amplitude, down for negative |
+| line width | `1.1 + 2.0 × min(1, |amplitude|)` |
+| arrow alpha | `0.55 + 0.35 × confidence` |
+| short horizontal bar at family row | scope-style relation (`negation_scope`, `uncertainty_scope`, `conditional_scope`, `list_disjunction`, `metalinguistic_operator_mention`) |
+| relation-kind label | text along the arrow or below the bar |
+
+The surface tells us *where* logical pressure exists. The graph tells us *which span supports which other span* — and it shows mentioned operators visually muted, so the eye sees what is logically load-bearing.
+
+### Results — same canonical sample text
+
+Saved as `outputs/v4/runs/example/` (params, input, metrics, 6 PNGs).
+
+15 operator events. New `usage` column (only the rows that changed from "all active" in v3):
+
+```
+maybe       uncertainty   mentioned        sent 2  clause 6   raw_amp −0.130   amp −0.016   evidence text_says_or_mentions_operator_word
+possibly    uncertainty   mentioned        sent 2  clause 7   raw_amp −0.130   amp −0.016   evidence text_says_or_mentions_operator_word
+or          disjunction   list_connector   sent 2  clause 8   raw_amp +0.068   amp +0.015   evidence connector_between_mentioned_operator_words
+not         negation      mentioned        sent 2  clause 8   raw_amp −0.800   amp −0.096   evidence text_says_or_mentions_operator_word
+```
+
+The other 11 operators remain `active` at confidence 0.82, unchanged amplitudes.
+
+10 inferred relations (relation count unchanged from v3, but the *kinds* shift — the 1 `negation_scope` + 2 `uncertainty_scope` from v3 become 3 `metalinguistic_operator_mention`):
+
+```
+implication                         sent 0  clause 0   amp +0.816  conf 0.96  if_scope -> then_scope                  explicit_if_then
+contrast                            sent 1  clause 2   amp −0.518  conf 0.72  left_claim <-> however_right_claim      contrast_previous_sentence
+implication                         sent 1  clause 3   amp +0.816  conf 0.96  if_scope -> then_scope                  explicit_if_then
+causal_support                      sent 1  clause 4   amp +0.508  conf 0.82  because_local_supports_if_scope         because_inside_if_then
+contrast                            sent 2  clause 6   amp −0.518  conf 0.72  left_claim <-> but_right_claim          contrast_previous_sentence
+metalinguistic_operator_mention     sent 2  clause 6   amp −0.014  conf 0.88  mentioned_word:maybe                    text_says_or_mentions_operator_word
+metalinguistic_operator_mention     sent 2  clause 7   amp −0.014  conf 0.88  mentioned_word:possibly                 text_says_or_mentions_operator_word
+list_disjunction                    sent 2  clause 8   amp +0.118  conf 0.82  mentioned_items_listed_with_or          uncertainty_or_negation_marker_list
+metalinguistic_operator_mention     sent 2  clause 8   amp −0.084  conf 0.88  mentioned_word:not                      text_says_or_mentions_operator_word
+conclusion                          sent 3  clause 10  amp +0.738  conf 0.82  premises -> therefore_conclusion        conclusion_previous_sentence_fronted_marker
+```
+
+Two qualitative changes worth naming:
+
+- The **`conclusion`** relation is now non-degenerate. Source = the entire previous sentence (*"But when the text repeatedly says maybe possibly or not, the surface develops uncertainty troughs and contradiction pressure"*), target = the post-`therefore` clause (*"this geometric representation can help us compare texts by their logical shape rather than only by their words"*). v3's self-copy is gone.
+- The **`list_disjunction`** source/target spans now point to the literal list items: source = `(maybe, possibly)`, target = `(not)`. v3's broader window is gone.
+
+Metrics (v3 → v4 deltas on the bucket changes only):
+
+```
+active_operator_count                       —      → 11        (new)
+mentioned_operator_count                    —      →  3        (new)
+list_connector_operator_count               —      →  1        (new)
+active_operator_density_per_100_tokens      —      → 15.5844   (new)
+mentioned_operator_density_per_100_tokens   —      →  3.8961   (new)
+uncertainty_scope_density                   2.5974 →  0.0000   (was 2 active scopes; now 2 mentions)
+negation_scope_density                      1.2987 →  0.0000   (was 1 active scope; now 1 mention)
+metalinguistic_mention_density              —      →  3.8961   (new, replacement total)
+uncertainty_density (operator-family count) 2.5974 →  0.0000   (no more "active" uncertainty operators)
+
+relation_to_operator_energy_ratio_raw       0.3280 →  0.4077   (rose — conclusion now contributes a real bridge)
+relation_to_operator_energy_ratio           0.3280 →  0.4077   (still well under the 1.25 cap)
+relation_energy_scale                       1.0000 →  1.0000   (cap not needed)
+scope_coverage_ratio                        0.7403 →  0.9870   (rose — see Interpretation)
+bridge_coverage_ratio                       0.6364 →  0.8571   (rose — same reason)
+argumentative_depth                         4      →  5        (one more overlap from the broader conclusion target)
+average_relation_confidence                 0.8160 →  0.8460
+minimum_relation_confidence                 0.7200 →  0.7200
+semantic_stability                          0.7725 →  0.8022
+logical_balance_ratio                       1.1287 →  1.3616   (positive density rose; negative fell)
+positive_wave_density                       0.1194 →  0.1258
+negative_wave_density                       0.1057 →  0.0924
+surface_energy_density                      0.1153 →  0.1212
+logical_tension_density                     0.0180 →  0.0241
+```
+
+`interpret_metrics` summary:
+
+> constructive/inferential forces dominate; low local logical tension; relations substantially shape the surface; no severe relation overreach was detected; broad text coverage; high average relation confidence; some logical words are mentioned rather than actively used; high semantic stability.
+
+### Interpretation
+
+The four targeted v3 limitations are addressed:
+
+```
+(v3 limitation 1) therefore target self-copy        →  v4 conclusion has distinct source / target spans
+(v3 limitation 2) not-in-list double-counted        →  v4 not is mentioned at amp −0.096 (was −0.380 active scope)
+(v3 limitation 3) mentioned-vs-used not distinguished →  3 mentioned operators classified at conf 0.88
+(v3 limitation 5) no relation-graph overlay         →  relation_graph.png is the 6th PNG per run
+```
+
+`logical_balance_ratio` rose from 1.13 → 1.36 — the model now reads the paragraph as *more* constructive than v3 did. The intuition: v3 was scoring three active negation/uncertainty events at full amplitude on a paragraph whose narrator was merely *describing* uncertainty words; v4 strips that false destabilization out and the constructive structures (the two `implication`s, the `causal_support`, the now-correct `conclusion`) dominate the surface. This matches the user-level reading of the paragraph — it is an explanatory paragraph about logical structure, not an expression of uncertainty.
+
+`semantic_stability` rose 0.77 → 0.80 for the same reason. Two contradictory pressures (uncertainty and negation densities) went to zero; the metric's denominator shrank.
+
+But two metrics moved in the "wrong" direction relative to the v3 entry conditions, and **they should not be read as regressions**:
+
+- **`scope_coverage_ratio` 0.740 → 0.987** — the v3 number was inflated by *contrast spans across sentences* and held down by the *broken conclusion target* (which contributed only its 9-token source instead of source + a real ~17-token target). v4 keeps the wide contrast spans and adds the correct conclusion target on top, so coverage rises. The v3 entry condition "scope_coverage_ratio < ~0.70" was wrong about what v4 *should* achieve — it was a reasonable target *given the bug*, but the metric itself doesn't separate "broad coverage from many distinct, correct relations" from "broad coverage from one ballooning relation". v5 needs to revisit the metric, not the model.
+- **`relation_to_operator_energy_ratio` 0.328 → 0.408** — the correct conclusion bridge adds real energy. Still well under the 1.25 cap; the relation field still does not flood. The diagnostic value of the metric is intact; only the absolute number moved.
+
+The visual confirmation is in `relation_graph.png`: dim small markers for `maybe`/`possibly`/`not` (mentioned), full-size markers for the 11 active operators, two upward arcs along the condition row for the implications, a small upward arc for `causal_support`, two downward arcs for the contrasts, one upward arc spanning sentence 2 → sentence 3 for the conclusion, and a short bar for the `list_disjunction` and the three `metalinguistic_operator_mention`s. The topology is now readable.
+
+### Limitations of v4 (and what they motivate)
+
+1. **`scope_coverage_ratio` is now ambiguous.** A run with three small, distinct relations covering 0.95 of the tokens reads identically to a run with one giant bad relation covering 0.95. The metric counts coverage, not quality. → **v5 should split it: `distinct_span_coverage` (union of *non-overlapping* relation spans), `mean_relation_span_length` (so a single huge relation can be flagged), and perhaps `coverage_per_relation_kind` (so contrast-driven coverage is distinguishable from implication-driven coverage).**
+
+2. **`if`-source clamp is still missing.** v3 limitation 4 was not addressed in v4. The second implication's source still extends through the comma into the `because`-clause's territory: source span is `"the same text also contains strong causal operators because it explains why one claim follows from another"`. The `because`-clause is correctly handled as its own relation, but it appears *inside* the `if`-source. → **v5 should clamp the `if`-source at the first major-operator boundary inside the `if`-arm (the same `bounded_end` treatment target spans already get).**
+
+3. **`semantic_stability` is now *higher* on a contradictory paragraph than v3.** 0.80 vs. 0.77. v3 limitation 6 was deferred and is arguably worse now: removing the false-positive active scopes for `maybe`/`possibly`/`not` removed three penalties from the metric's denominator, so a paragraph featuring `however`, `but`, and an entire sentence of described uncertainty still scores "high stability". → **v5 should sanity-check the metric on a deliberately contradictory text and recalibrate. The current weighting under-counts contrast and over-trusts the absence of active uncertainty.**
+
+4. **Mention classification is rule-based and fragile.** Four passes, three lexicons, English-only. It correctly handles *"the text says maybe"* but misses *"the word maybe is interesting"* (no MENTION_VERB in left-6), *"consider the operators: maybe, possibly, not"* (colon-separated, MENTION_NOUN beyond direct adjacency), and *"'maybe' carries hedging weight"* (single-quote already handled, but the verb is after the operator). It also has false positives: *"Alice lists her concerns"* — `lists` is a MENTION_VERB, and if a `not`/`maybe` appears in the next 7 tokens it would falsely match pass 4. → **v5 should at minimum add a parser-light dependency check (does the operator's parent in a shallow parse target a `say`/`list`/`mention` head?), or accept the fragility and add a `--strict-mention-mode` flag for users who want to disable mention detection.**
+
+5. **`metalinguistic_operator_mention` lives on the original operator's family row.** A mentioned `maybe` still adds a (small) negative wave to the *uncertainty* family. A paragraph talking *about* uncertainty thus still elevates the uncertainty row at 12% strength, which subtly contradicts the "this is not active uncertainty" classification. → **v5 should add a 9th family — `metalinguistic` — and route all mentioned operators to it. The original family becomes the *referent* (preserved as `event.family`), and the Y-axis row becomes `metalinguistic`. Two consequences: `FAMILY_ORDER` grows (which invalidates surface-comparison-across-versions, the v1-vintage warning); and the operator-only heatmap gains a dedicated row for "the text is being meta".**
+
+6. **Relation-graph overlay flattens parallel relations.** The two `contrast` relations on the canonical text have identical `|amplitude| = 0.518` and `confidence = 0.72`, and the encoding (line width × alpha) gives them identical visual weight on the same family row. They overlap visually even though they belong to different sentences. → **v5 should offset parallel relations along Y (a small per-relation jitter), or draw them on slightly different curves (`rad ± 0.05`), or label each arrow with its sentence index.**
+
+### Concrete v5 entry conditions
+
+To move from v4 to v5 cleanly:
+
+```
+if-source clamp                       second implication source ends at the comma before "because"
+distinct_span_coverage                new metric, < 0.85 on canonical text
+semantic_stability                    drops on a known contradictory paragraph
+                                      (e.g., "A is true. However, A is false. Therefore A is false.")
+metalinguistic family row             FAMILY_ORDER includes "metalinguistic"; mentioned events emit there
+relation-graph parallel relations     visually distinguishable when |amplitude| and confidence match
+```
+
+The first is a one-line `bounded_end` insertion. The second + third are calibration work plus one new metric. The fourth changes `FAMILY_ORDER` (load-bearing across the codebase). The fifth is a plotting tweak.
+
+### Open questions to revisit at v5
+
+- Adding a `metalinguistic` row breaks Y-axis stability — every previous surface has 8 family rows and a v5 surface would have 9. Is the right move to (a) accept the break and version the layout (`SURFACE_LAYOUT_VERSION = 2`), (b) keep the row count fixed and rename an existing under-used row, or (c) introduce a second surface (`metalinguistic_Z` alongside `operator_Z` and `relation_Z`) so the family-axis layout is preserved?
+- Pass 4 of `classify_operator_usage` requires a MENTION_VERB in the local window. Should it also fire on punctuation patterns like *"consider:"* or *"e.g."* that signal a list without a verb?
+- Is the `list_disjunction` encoding (source/target = literal mentioned items, single span) the right shape, or should it produce N−1 pairwise relations (one per adjacent pair of items)? The single-relation form is cleaner; the pairwise form would let the relation graph show the list as a chain of arrows.
+- Should the `interpret_metrics` line mention the *direction* of the regime change (e.g., "the surface energy is dominated by the *constructive* side") rather than just "constructive forces dominate"? The current one-liner is information-dense but jargon-leaning.
+
+---
