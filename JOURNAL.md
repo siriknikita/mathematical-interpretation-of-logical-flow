@@ -783,3 +783,258 @@ The first is a one-line `bounded_end` insertion. The second + third are calibrat
 - Should the `interpret_metrics` line mention the *direction* of the regime change (e.g., "the surface energy is dominated by the *constructive* side") rather than just "constructive forces dominate"? The current one-liner is information-dense but jargon-leaning.
 
 ---
+
+## Stage 5 — Claim extraction, typed claim graph, vector field, genre + diagnostics (`logical_surface_model_v5.py`)
+
+**Status:** current. Entry point: `uv run logical_surface_model_v5.py` (CLI shape identical to v3 / v4).
+
+### Goal
+
+Promote the model from a scalar-only surface to a **three-layer pipeline**:
+
+```
+text
+ → tokens → operators → relations            (layer 1: operator events — v4)
+ → claims → typed claim graph                 (layer 2: claim graph — new)
+ → scalar surface → vector flow field         (layer 3: geometry — new vector layer)
+ → genre + diagnostics                        (interpretation pass)
+```
+
+The Stage-4 retrospective surfaced that the scalar surface alone could not represent *what supports what*; the relation-graph overlay was a presentation patch. v5 makes the claim graph a **first-class layer** computed from the operator/relation evidence, with its own dataclasses, metrics, and PNG. The surface remains a function of the operator + relation fields (no change vs. v4 in that math), but the surface is now read through a vector-flow lens and the metrics describe both surface *and* graph.
+
+v5 does not address every v4 limitation. It addresses (1) by recasting `scope_coverage_ratio` as one signal among many alongside claim-graph metrics; explicitly defers (2) the `if`-source clamp; touches (3) `semantic_stability` only via reweighting in the new interpret line; does not modify (4) the mention classifier; partly answers (5) by giving metalinguistic claims their own `metalinguistic_token_claim` kind (no new family row yet); and does not change (6) the relation-graph parallel-relation encoding.
+
+### Model
+
+#### Diff against v4 (only what changed)
+
+| # | Decision | v4 | v5 | Why |
+| - | -------- | -- | -- | --- |
+| 1 | Dataclasses | `Token`, `ClauseBoundary`, `LogicalOperator`, `OperatorEvent`, `LogicalRelation`, `SurfaceBundle` | adds `Claim(id, start, end, center, text, sentence_index, clause_index, kind, confidence, evidence)`, `ClaimRelation(id, kind, macro_family, micro_relation, source_claim_id, target_claim_id, source/target_start/end, amplitude, confidence, evidence_type, evidence, relation_index, is_implicit)`, `LogicalGraph(claims, claim_relations)`, `VectorFieldBundle(X, Y, U, V, magnitude)` | claims and relations need to be addressable, comparable, and serializable — string-tagged spans aren't enough |
+| 2 | Claim extraction | (none — clauses are not promoted to claims) | new `extract_claims` (`logical_surface_model_v5.py:1816`) walks every clause, applies `trim_claim_span` to strip leading discourse markers (`if`/`then`/`because`/`but`/`however`/…) and trailing connectives (`and`/`or`/`but`), then `infer_claim_kind` classifies the trimmed span as one of: `metalinguistic_token_claim` (≤3 words and all events are mentioned/quoted/list_connector/structural), `condition_claim`, `causal_or_conclusion_claim`, `contrast_claim`, `problem_claim`, `prescriptive_claim`, or `assertive_claim` (default) | the unit of logical truth is a proposition, not a clause; trimming separates the operator from the proposition it controls |
+| 3 | Claim graph | (none — relations live only on the surface) | new `build_claim_graph` (`logical_surface_model_v5.py:1897`) lifts each `LogicalRelation` to a `ClaimRelation` by mapping source/target spans to the *nearest* claim via `nearest_claim_id` (prefers overlap, falls back to center distance); attaches macro_family + micro_relation labels from `relation_micro_label`; then adds **implicit** edges between adjacent claims based on simple lexical patterns (positive↔negative polarity → `implicit_contrast`, temporal/problem→solution flow → `implicit_causal_candidate`) with confidence 0.40–0.42 | the same `LogicalRelation` becomes a different object when read at claim-granularity — micro_relation distinguishes a `sufficient_condition_or_implication` from a `premise_to_conclusion`, even though both are `kind="cause"` family relations |
+| 4 | Macro/micro labels | each relation has one `kind` | `relation_micro_label` returns `(macro_family, micro_relation, evidence_type)` per relation, so a `causal_support` becomes `("cause", "local_reason_supporting_condition", "syntactic_pattern")` when nested in `if … then …` and `("cause", "reason_or_explanation", "explicit_marker")` otherwise | downstream analysis (genre inference, diagnostics) needs the finer distinction without re-deriving it from the evidence string |
+| 5 | Implicit relations | (none) | `build_claim_graph` adds candidates between adjacent claims when no explicit relation already covers that pair — confidence ≤0.42, `is_implicit=True`, distinguishable in metrics via `implicit_claim_relation_count` | the surface-level relation set is conservative (only fires on explicit markers); the claim graph admits low-confidence inferred edges as a separate, opt-out signal |
+| 6 | Vector field | (none — surface is read as a height map) | new `build_vector_field` (`logical_surface_model_v5.py:2037`) walks the claim graph and accumulates a (U, V) vector field: each edge contributes `direction × |amplitude| × confidence × bounded_bridge_kernel`; positive relations bend U +x and V +y, negative bend +y down; magnitude = √(U² + V²) | the geometric field is now usable as a *flow*, not just a height map — gradient direction encodes causal/conditional momentum |
+| 7 | Graph metrics | (none) | `compute_graph_metrics` adds `claim_count`, `claim_relation_count`, `explicit_claim_relation_count`, `implicit_claim_relation_count`, `average_claim_degree`, `disconnected_claim_count`, `disconnected_claim_ratio`, `convergent_claim_count` (in-degree ≥2), `support_chain_depth` (longest DFS over implication/causal_support/conclusion/implicit_causal edges), `average_claim_confidence`, `average_claim_relation_confidence` — merged into the existing `metrics` dict | graph structure is now measurable independent of the surface; a paragraph with 10 claims and disconnected_claim_ratio = 0 reads differently from one with the same surface metrics but disconnected_claim_ratio = 0.4 |
+| 8 | Genre inference | (none) | `infer_genre` (`logical_surface_model_v5.py:2059`) — 5-way classifier by lexicon + metric profile: `mathematical_or_formal_argument` (theorem/lemma/proof/suppose vocab), `bug_report_or_engineering_diagnostic` (expected/actual/reproduce/bug/crash/error), `scientific_or_research_prose` (abstract/method/results/dataset + "we propose"), `exploratory_argument` (high contrast_pressure + uncertainty_density), else `general_explanatory_argument` | downstream diagnostics need to know what kind of text they're advising about; a "weak support chain" is alarming in a proof and tolerable in a casual note |
+| 9 | Diagnostics pass | `interpret_metrics` line only | `generate_diagnostics` (`logical_surface_model_v5.py:2073`) returns a list of one-line warnings keyed off specific metric thresholds (`disconnected_claim_ratio > 0.35`, `conclusion_force > 0.7` with low `causal_relation_density`, `mentioned_operator_density > 2`, `semantic_stability < 0.55`, genre-specific shallow proof / weak bug-report structure) — empty list collapses to "No major structural warning". `interpret_metrics` line is preserved alongside | the model can now surface *actionable* observations to the reader, not just a numerical fingerprint |
+| 10 | Plotting | 6 PNGs (v4 set) | 8 PNGs: adds `plot_claim_graph` (claims as nodes positioned by `(center, FAMILY_TO_Y[macro_family])`, edges by macro_family; implicit edges in dashed style) and `plot_vector_field` (quiver overlay on surface magnitude with color = √(U²+V²)) | the claim graph and vector field need their own representations; the relation graph from v4 stays for span-level topology |
+| 11 | Output layout | params + input + metrics + 6 PNGs | adds `analysis.json` next to `metrics.json`: full `claims` list, full `claim_relations` list, inferred genre with confidence and evidence, diagnostics list. 8 PNGs total | the structured outputs (lists of claims, lists of typed edges, diagnostic strings) don't fit a flat metrics dict; `analysis.json` is the structured artifact |
+| 12 | New operator-usage buckets | `usage` ∈ {active, mentioned, list_connector} | metrics also expose `quoted_operator_count` and `structural_operator_count` densities (the schema already supports them via `usage`, but v5 surfaces them in the metric dict alongside `active`/`mentioned`/`list_connector`) | hooks for future passes that detect `"like 'and'"` (quoted) and `"first / second / finally"` (structural discourse markers) |
+
+Everything else is preserved from v4 — operator catalog, `bounded_end`, `classify_operator_usage`, the v4 relation rules including the conclusion fix and `is_list_or`, `bounded_bridge_kernel`, `normalize_relation_energy`, `plot_relation_graph`, run-folder output layout.
+
+#### `trim_claim_span` (`logical_surface_model_v5.py:1746`)
+
+```
+loop while changed:
+    for each event whose token_start == claim.start:
+        if event.usage in {mentioned, list_connector}: skip
+        if event.phrase in CLAIM_LEADING_TRIM_PHRASES or
+           event.family in {condition, cause, contrast}:
+            claim.start = event.token_end
+            record evidence: trimmed_leading_<phrase>
+            restart loop
+while tokens[start] in {and, or, but, so}:        # leftover connectives
+    claim.start += 1; record trimmed_connective_<token>
+while tokens[end-1] in {and, or, but}:            # trailing dangle
+    claim.end -= 1; record trimmed_trailing_<token>
+return (start, end, evidence)
+```
+
+The result is that *"If a text contains many conditions"* becomes the claim `a text contains many conditions` with evidence `trimmed_leading_if`; *"because it explains why one claim follows from another"* becomes `it explains why one claim follows from another` with evidence `trimmed_leading_because`.
+
+#### `nearest_claim_id` (`logical_surface_model_v5.py:1849`)
+
+```
+for each claim:
+    if relation_span overlaps claim_span:
+        score = -1000 - overlap_size        # overlap always beats proximity
+    else:
+        score = abs(claim_center - relation_center)
+return min(score)
+```
+
+Overlap-or-proximity, not exact span match — `LogicalRelation` spans (e.g., the entire `if`-arm) typically straddle multiple claims; the rule picks the claim with the most overlap, falling back to the centroid-nearest claim when there is no overlap at all.
+
+#### Implicit-relation candidates (`logical_surface_model_v5.py:1928`)
+
+Between each adjacent claim pair `(left, right)`:
+
+```
+if (left has POSITIVE_WORDS and right has NEGATIVE_WORDS) or vice versa:
+    → implicit_contrast (amp -0.26, conf 0.42, evidence "opposite_polarity_lexicon")
+if (left has TEMPORAL_CAUSAL_WORDS and right has PROBLEM_WORDS) or
+   (left has PROBLEM_WORDS and right has SOLUTION_WORDS):
+    → implicit_causal_candidate (amp +0.24, conf 0.40, evidence "temporal_problem_solution_lexicon")
+```
+
+`POSITIVE_WORDS`, `NEGATIVE_WORDS`, `TEMPORAL_CAUSAL_WORDS`, `PROBLEM_WORDS`, `SOLUTION_WORDS` are small hand-curated sets. These edges are added *only* when no explicit relation already covers the same `(source, target, kind)` tuple. The canonical text triggers zero implicit candidates — its operator markup is dense enough that every claim pair is already explicitly connected, which is also why `implicit_claim_relation_count = 0` on the canonical run.
+
+#### `build_vector_field` (`logical_surface_model_v5.py:2037`)
+
+```
+U, V = 0, 0
+for each claim_relation:
+    direction = +1 if target_center >= source_center else -1
+    strength  = |amplitude| × confidence
+    kernel    = bounded_bridge_kernel(X, Y, source_center, target_center, family_y, …)
+    U += direction × strength × kernel                              # longitudinal flow
+    V += (+0.18 if positive else -0.18) × strength × kernel         # vertical bias
+magnitude = sqrt(U² + V²)
+```
+
+Reuses `bounded_bridge_kernel` from v3/v4 — the same thin bridge that the relation field uses, now bent into a directed vector. Constructive relations push the field upward (toward higher logical-family rows); destabilizing relations push downward. The quiver in `vector_field.png` is the directional field; the colormap behind it is the scalar magnitude.
+
+### Results — same canonical sample text
+
+Saved as `outputs/v5/runs/example/` (params + input + metrics + analysis + 8 PNGs).
+
+Operator-level numbers carry over from v4 unchanged (same `classify_operator_usage` rules, same operator catalog): 15 operators, 11 active / 3 mentioned / 1 list_connector, surface metrics identical to v4.
+
+**10 extracted claims:**
+
+```
+id  kind                          conf   sent  clause  text
+ 0  assertive_claim               0.58    0     0      a text contains many conditions
+ 1  assertive_claim               0.58    0     1      it may branch into several possible meanings
+ 2  assertive_claim               0.58    1     3      the same text also contains strong causal operators
+ 3  assertive_claim               0.58    1     4      it explains why one claim follows from another
+ 4  assertive_claim               0.58    1     5      the logical flow becomes more structured
+ 5  assertive_claim               0.58    2     6      the text repeatedly says maybe
+ 6  metalinguistic_token_claim    0.82    2     7      possibly
+ 7  metalinguistic_token_claim    0.82    2     8      not
+ 8  assertive_claim               0.58    2     9      the surface develops uncertainty troughs and contradiction pressure
+ 9  assertive_claim               0.58    3    11      this geometric representation can help us compare texts by their logical shape rather than only by their words
+```
+
+Eight `assertive_claim` (confidence 0.58 — the default-clause fallback), two `metalinguistic_token_claim` (confidence 0.82 — fired on the single-token clauses 7 and 8 because `len(words) ≤ 3` and all events are mentioned/list_connector).
+
+**10 claim-level relations** (all explicit, none implicit):
+
+```
+id  kind                              macro       micro                                   src  tgt  amp     conf
+ 0  contrast                          contrast    discourse_opposition                    1    2   -0.518  0.72
+ 1  implication                       condition   sufficient_condition_or_implication     0    1   +0.816  0.96
+ 2  contrast                          contrast    discourse_opposition                    2    8   -0.518  0.72
+ 3  implication                       condition   sufficient_condition_or_implication     2    4   +0.816  0.96
+ 4  causal_support                    cause       local_reason_supporting_condition       3    2   +0.508  0.82
+ 5  conclusion                        cause       premise_to_conclusion                   8    9   +0.738  0.82
+ 6  metalinguistic_operator_mention   uncertainty operator_mentioned_not_used             5    5   -0.014  0.88
+ 7  list_disjunction                  disjunction enumeration_not_branching               5    7   +0.118  0.82
+ 8  metalinguistic_operator_mention   uncertainty operator_mentioned_not_used             6    6   -0.014  0.88
+ 9  metalinguistic_operator_mention   negation    operator_mentioned_not_used             7    7   -0.084  0.88
+```
+
+The claim chain reconstructed from these edges:
+
+```
+C0 (a text contains many conditions)
+   ─(implication)→ C1 (it may branch into several possible meanings)
+                       │
+                       └─(contrast)→ C2 (the same text also contains strong causal operators)
+                                          ↑
+                                          └─(causal_support)─ C3 (it explains why one claim follows from another)
+                                          │
+                                          └─(implication)→ C4 (the logical flow becomes more structured)
+                                          │
+                                          └─(contrast)→ C8 (the surface develops uncertainty troughs ...)
+                                                              │
+                                                              └─(conclusion)→ C9 (this geometric representation ...)
+
+C5/C6/C7 = metalinguistic mentions (maybe / possibly / not) — self-loop relations + a list_disjunction C5 → C7.
+```
+
+**New graph metrics** (alongside the v4 operator/relation metrics):
+
+```
+claim_count                         10
+claim_relation_count                10
+explicit_claim_relation_count       10
+implicit_claim_relation_count        0
+average_claim_degree                 2.000   (every claim touches 2 edges on average)
+disconnected_claim_count             0       (every claim participates in the graph)
+disconnected_claim_ratio             0.000
+convergent_claim_count               2       (claim 2 has 3 incoming edges; claim 5 has 2)
+support_chain_depth                  2       (longest implication/causal/conclusion chain: e.g., C3 → C2 → C4)
+average_claim_confidence             0.628   (8 assertive at 0.58, 2 metalinguistic at 0.82)
+average_claim_relation_confidence    0.846
+```
+
+**Genre + diagnostics:**
+
+```
+Inferred genre:   general_explanatory_argument
+Genre confidence: 0.55
+Genre evidence:   default_profile
+
+Diagnostics:
+1. Several logical words are mentioned as tokens rather than used as live logical operators;
+   this should be interpreted as metalinguistic content.
+```
+
+`interpret_metrics` summary (unchanged in shape from v4):
+
+> constructive/inferential forces dominate; low local logical tension; relations substantially shape the surface; no severe relation overreach was detected; broad text coverage; high average relation confidence; some logical words are mentioned rather than actively used; high semantic stability.
+
+### Interpretation
+
+The three layers separate cleanly and tell different stories:
+
+- **Layer 1 (operators):** same picture as v4 — 11 active operators driving a constructive surface, 3 mentioned operators tagged out of the active count.
+- **Layer 2 (claims):** the paragraph reduces to a **two-implication backbone with two contrast turns and one conclusion**. The claim graph reads like a compact argument map: condition → consequence; alternate condition → consequence with internal `because`-support; both sides contrast against a metalinguistic example region; the example region concludes with a structural meta-claim about the model itself.
+- **Layer 3 (vector field):** the quiver shows directed flow concentrated around tokens 0–14 (first implication), 16–40 (second implication + internal support), and 58–77 (conclusion). The metalinguistic region (tokens 42–50) shows weak, short, alternating vectors — the small self-loop relations contribute almost nothing to flow.
+
+The claim graph also confirms that v4's "scope_coverage_ratio = 0.987 is not a regression" intuition holds at the claim level: `disconnected_claim_ratio = 0` and `average_claim_degree = 2.0` say the broad coverage is the *graph filling itself in*, not one ballooning relation. **The v4 metric ambiguity is partially answered by the new graph metrics, not by recalibrating the surface metric.**
+
+`average_claim_confidence = 0.628` is the headline weakness — 8 of 10 claims fall through to the default `assertive_claim` at 0.58. The claim *extraction* is heuristic; only the claim *kind* classifier and the metalinguistic detector have any real precision. This is the right thing to upgrade next.
+
+Genre inference falls through to `general_explanatory_argument` at the default 0.55 confidence — the canonical text is not lexically distinctive enough for the rule-based classifier. The genre lexicons (mathematical / bug-report / research) are small and English-only by design; the fallback exists for exactly this case.
+
+### Limitations of v5 (and what they motivate)
+
+1. **Claim extraction is mostly trimming, not parsing.** 8 of 10 claims have confidence 0.58 — the `default_clause_claim` evidence trail. The only confident claims are the two single-token `metalinguistic_token_claim`s. `extract_claims` does not detect subject/predicate structure, embedded clauses, conjoined predicates, or anaphora resolution; it treats every clause boundary as a claim boundary, which is right for short, well-punctuated prose and wrong for academic-grade text. → **v6 should add a shallow predicate-detection pass (verb + object) and merge claims that share a subject across `and`/`or`.**
+
+2. **C5 misclassification: a mentioned-operator sentence becomes a high-confidence assertive claim.** Claim 5 has text `"the text repeatedly says maybe"`, kind `assertive_claim`, confidence 0.58. The `metalinguistic_token_claim` rule requires `len(words) ≤ 3`; C5 has 5. The result is that the *meta* sentence is misread as an assertive claim about what the text says, while only the single-token follow-ups `possibly` (C6) and `not` (C7) get the metalinguistic kind. → **v6 should detect the metalinguistic frame at the claim level: a claim whose span *contains* a mention-verb + mentioned operator (not just one that *is* a mentioned operator) should be reclassified as `metalinguistic_frame_claim`.** A stronger version would merge C5/C6/C7 into a single `the text mentions the markers "maybe", "possibly", and "not"` claim.
+
+3. **`if`-source overreach (v3 limitation 4) still alive, now hidden by the claim graph.** The second implication's underlying `LogicalRelation` source spans tokens 16–33 — i.e., *"the same text also contains strong causal operators because it explains why one claim follows from another"* — straddling both claim 2 and claim 3. `nearest_claim_id` picks claim 2 (the strongest overlap), so the claim graph reads as if the source were just claim 2; the `because`-clause material in claim 3 is silently dropped from the implication. The claim graph layer happens to mask the bug for this text; on a text where the `because`-clause is the load-bearing content of the `if`-arm, the bug would surface as a wrong-source implication. → **v6 should fix the underlying relation span (the `bounded_end` insertion deferred in v4 and v5), not rely on the claim layer to paper over it.**
+
+4. **Implicit-relation layer is essentially untested.** Canonical text triggers zero implicit candidates; the lexicons (`POSITIVE_WORDS`/`NEGATIVE_WORDS`/`TEMPORAL_CAUSAL_WORDS`/`PROBLEM_WORDS`/`SOLUTION_WORDS`) and the adjacent-claims-only rule are too narrow to fire on a dense-operator paragraph. The interesting test cases are the *sparse-operator* texts the user named: *"The deployment finished at noon. The server crashed at 12:05."* — temporal proximity + problem word, no explicit causal marker, should produce an `implicit_causal_candidate`. → **v6 should add a sparse-operator test corpus and tune the implicit-edge rules against it; current rules are speculative until validated against texts that need them.**
+
+5. **`scope_coverage_ratio` and `bridge_coverage_ratio` are still ambiguous at the surface level.** They are unchanged from v4 (0.987 / 0.857). The new claim-graph metrics (`disconnected_claim_ratio`, `average_claim_degree`) provide a complementary read at a different granularity, but the surface metric still doesn't distinguish "broad coverage from many small valid relations" from "one ballooning relation". → **v6 should either replace the surface coverage metric with `distinct_span_coverage` (proposed in v4 limitations) or formally pair it with `disconnected_claim_ratio` so the two together tell the whole story.**
+
+6. **Genre classifier is lexicon-only, English-only, and the canonical text falls through.** `infer_genre` returns the default `general_explanatory_argument` at 0.55 because the canonical text has no `theorem`/`bug`/`abstract`/`we propose` markers and its contrast_pressure + uncertainty_density profile doesn't reach the `exploratory_argument` thresholds. The genre slot is filled with a low-confidence default, which is honest but unhelpful — downstream `generate_diagnostics` rules keyed off genre then can't fire (e.g., the proof-shallow check, the bug-report-cause-effect check). → **v6 should add a confidence floor below which `genre = "unclassified"` is returned, so diagnostics don't silently skip; and add a small metric-only profile fallback (high `average_claim_degree` + high `support_chain_depth` → `argument`; low both → `description`).**
+
+7. **`metalinguistic_operator_mention` claim-edges are self-loops.** Edges 6, 8, 9 all have `source_claim_id == target_claim_id`. They register at the metrics layer (`metalinguistic_mention_density = 3.896`) but contribute nothing to graph topology, degree, or chain depth. They also pollute `average_claim_relation_confidence = 0.846` upward (three 0.88 self-loops on otherwise more variable confidences). → **v6 should either filter self-loops out of graph metrics or have metalinguistic mentions attach to the frame claim that mentions them (e.g., C5 in the canonical run), not to themselves.**
+
+8. **Vector-field encoding choices are not validated.** Constructive→+y, destabilizing→−y is a hand-picked convention; the magnitude colormap is the default viridis at default scale. There is no test corpus where the vector field has been verified to show what it should show. The encoding *looks* plausible on the canonical text (flow concentrates around implications and the conclusion) but that may be confirmation bias. → **v6 should validate against ≥2 known-shape texts: a clean proof chain (expect strong unidirectional flow along cause), a contradictory paragraph (expect colliding flows).**
+
+### Concrete v6 entry conditions
+
+To move from v5 to v6 cleanly:
+
+```
+average_claim_confidence              ≥ 0.75 on canonical text (vs. 0.628 now)
+canonical metalinguistic frame        C5 promoted to metalinguistic_frame_claim
+                                      (or C5/C6/C7 merged into one)
+if-source overreach                   second implication's underlying relation source
+                                      ends at the comma before "because"
+implicit_claim_relation_count         ≥ 1 on the deployment/crash sparse-operator test
+genre fallback                        returns "unclassified" instead of low-confidence default
+                                      OR fires a metric-only profile
+metalinguistic self-loops             excluded from average_claim_relation_confidence
+                                      OR re-attached to a frame claim
+vector_field                          validated on ≥2 known-shape texts
+```
+
+The first is real NLP work (predicate detection, claim merging). The second + sixth are claim-classification rule tweaks. The third is the `bounded_end` insertion deferred since v4. The fourth requires a sparse-operator corpus and rule tuning. The fifth is a one-line threshold + a fallback rule. The seventh is one branch in `compute_graph_metrics`. The eighth is corpus work, not code.
+
+### Open questions to revisit at v6
+
+- Should the claim graph become the *primary* representation (the surface a downstream visualization) or stay as a *parallel* layer (current v5 design)? The current design preserves geometric metrics across versions; promoting the graph would let claim relations have their own non-geometric metrics (PageRank-style claim centrality, articulation points, etc.) but would break the "everything is a surface" framing.
+- Are `assertive_claim` / `condition_claim` / `causal_or_conclusion_claim` / `contrast_claim` / `problem_claim` / `prescriptive_claim` / `metalinguistic_token_claim` the right seven kinds? `problem_claim` and `prescriptive_claim` exist for bug-report genre but have no test coverage. `causal_or_conclusion_claim` collapses two distinct roles (premise vs. conclusion) into one bucket.
+- Should `implicit_causal_candidate` edges weigh as much as explicit ones in `support_chain_depth`? Currently they do (DFS doesn't filter by `is_implicit`), which means a chain of low-confidence implicit edges can inflate the metric.
+- Should `analysis.json` be parsed on read by a `load_run(run_dir)` helper, or is plain JSON the right surface? A typed loader would make cross-run comparisons easier but adds a dependency on the dataclass schema.
+
+---
