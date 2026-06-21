@@ -1,0 +1,110 @@
+{
+  "run_id": "example",
+  "version": "v5",
+  "timestamp_utc": "2026-06-21T09:23:10.011387+00:00",
+  "script": "logical_surface_model_v5.py",
+  "input": {
+    "char_count": 539,
+    "sha256": "71e6f5672d874d00f17f309b77b716fbe327317b51f0d2a06cd95739fb8a344e",
+    "preview": "If a text contains many conditions, then it may branch into several possible meanings.\n    However, if the same text also contains strong causal operators, because it explains\n    why one claim follow"
+  },
+  "config": {
+    "x_resolution": 280,
+    "y_resolution": 140,
+    "operator_cross_family_width": 0.55,
+    "relation_cross_family_width": 0.42,
+    "max_relation_to_operator_ratio": 1.25
+  },
+  "operator_catalog": {
+    "count": 50,
+    "families": [
+      "conjunction",
+      "disjunction",
+      "negation",
+      "contrast",
+      "condition",
+      "cause",
+      "evidence",
+      "uncertainty"
+    ],
+    "sha256": "f1baa3c41310cd87e66193d0a1c090ddfec622e2bc3fcd44795ad2edead6eddf"
+  },
+  "intensifiers": [
+    "always",
+    "clearly",
+    "definitely",
+    "extremely",
+    "must",
+    "necessarily",
+    "obviously",
+    "really",
+    "strongly",
+    "very"
+  ],
+  "hedges": [
+    "apparently",
+    "could",
+    "kind",
+    "maybe",
+    "might",
+    "perhaps",
+    "possibly",
+    "probably",
+    "seems",
+    "somewhat",
+    "sort"
+  ],
+  "mention_verbs": [
+    "call",
+    "called",
+    "calls",
+    "list",
+    "listed",
+    "lists",
+    "mention",
+    "mentioned",
+    "mentions",
+    "name",
+    "named",
+    "names",
+    "quote",
+    "quoted",
+    "quotes",
+    "said",
+    "say",
+    "says",
+    "spell",
+    "spelled",
+    "spells",
+    "write",
+    "writes",
+    "written"
+  ],
+  "mention_nouns": [
+    "marker",
+    "markers",
+    "operator",
+    "operators",
+    "phrase",
+    "phrases",
+    "term",
+    "terms",
+    "token",
+    "tokens",
+    "word",
+    "words"
+  ],
+  "textual_subjects": [
+    "argument",
+    "claim",
+    "clause",
+    "document",
+    "example",
+    "line",
+    "model",
+    "paragraph",
+    "sentence",
+    "surface",
+    "text"
+  ]
+}

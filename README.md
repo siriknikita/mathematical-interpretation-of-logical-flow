@@ -43,13 +43,14 @@ uv run logical_surface_model_v1.py        # Stage 1: operator-wave toy model
 uv run logical_surface_model_v2.py        # Stage 2: + scope/relation fields
 uv run logical_surface_model_v3.py        # Stage 3: + bounded scopes, confidence, energy normalization
 uv run logical_surface_model_v4.py        # Stage 4: + mention detection, conclusion fix, relation-graph overlay
+uv run logical_surface_model_v5.py        # Stage 5: + claim extraction, typed claim graph, vector field, genre + diagnostics
 ```
 
 By default each script runs the embedded sample text, prints its analysis, opens the matplotlib windows, **and writes a full run directory under `outputs/v{N}/runs/{run_id}/`** (see below). Close the matplotlib windows to let the process exit.
 
 ### CLI flags
 
-All four versions share the same core flags:
+All five versions share the same core flags:
 
 | Flag | Default | Effect |
 | :--- | :--- | :--- |
@@ -59,14 +60,14 @@ All four versions share the same core flags:
 | `--no-save` | off | Skip writing the run directory entirely. |
 | `--output-dir PATH` | `./outputs` | Override the output root (run dir becomes `PATH/v{N}/runs/{run_id}/`). |
 | `--run-id ID` | auto | Override the auto-generated run id (`YYYYMMDDTHHMMSSZ_<text-sha6>_<uuid4>`). |
-| `--x-resolution N` | 240 (v1) / 280 (v2–v4) | Surface samples along the token axis. |
-| `--y-resolution N` | 120 (v1) / 140 (v2–v4) | Surface samples along the logical-family axis. |
+| `--x-resolution N` | 240 (v1) / 280 (v2–v5) | Surface samples along the token axis. |
+| `--y-resolution N` | 120 (v1) / 140 (v2–v5) | Surface samples along the logical-family axis. |
 
 Version-specific knobs:
 
 - **v1** — `--cross-family-width` (default `0.55`).
 - **v2** — `--operator-cross-family-width` (default `0.55`), `--relation-cross-family-width` (default `0.75`).
-- **v3, v4** — `--operator-cross-family-width` (default `0.55`), `--relation-cross-family-width` (default `0.42`), `--max-relation-ratio` (default `1.25`, caps relation/operator field energy).
+- **v3, v4, v5** — `--operator-cross-family-width` (default `0.55`), `--relation-cross-family-width` (default `0.42`), `--max-relation-ratio` (default `1.25`, caps relation/operator field energy).
 
 ### Run directory layout
 
@@ -87,18 +88,20 @@ PNG filenames per version:
 - **v2** — `total_surface.png`, `total_heatmap.png`, `operator_heatmap.png`, `relation_heatmap.png`
 - **v3** — v2 set with `relation_heatmap.png` split into `relation_raw_heatmap.png` and `relation_normalized_heatmap.png`
 - **v4** — same as v3 plus `relation_graph.png` (span topology overlay: arrows between source/target centers, scope bars for scope-style relations)
+- **v5** — same as v4 plus `claim_graph.png` (extracted claims as nodes, typed claim-to-claim edges) and `vector_field.png` (surface-gradient quiver). v5 also writes an extra `analysis.json` next to `metrics.json` carrying the claim list, claim-relation list, inferred genre, and diagnostics.
 
 ### Using the module from Python
 
 ```python
-from logical_surface_model_v4 import analyze_text
+from logical_surface_model_v5 import analyze_text
 
 result = analyze_text(
     "If it rains, then the picnic is cancelled. However, ...",
     show_plots=False,                  # don't open matplotlib windows
-    save=True,                         # still write outputs/v4/runs/{run_id}/
+    save=True,                         # still write outputs/v5/runs/{run_id}/
 )
 print(result["metrics"])
+print(result["genre"], result["diagnostics"])
 print(result["run_dir"])               # pathlib.Path of the run folder
 ```
 
@@ -109,6 +112,7 @@ logical_surface_model_v1.py    # Stage 1: operator waves on a token-position × 
 logical_surface_model_v2.py    # Stage 2: + scope/relation fields and clause inference
 logical_surface_model_v3.py    # Stage 3: + bounded scopes, confidence, energy normalization
 logical_surface_model_v4.py    # Stage 4: + mention vs. use detection, conclusion-target fix, relation-graph overlay
+logical_surface_model_v5.py    # Stage 5: + claim extraction, typed claim graph, vector field, genre + diagnostics
 pyproject.toml                 # dependencies (numpy, matplotlib) and Python pin
 uv.lock                        # resolved environment
 outputs/                       # auto-saved per-run folders (v{N}/runs/{run_id}/) plus example renders
